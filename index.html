@@ -393,10 +393,11 @@ async function sendToGemini() {
 const LETTER = { A:"에이", B:"비", C:"씨", D:"디", E:"이", F:"에프", G:"지", H:"에이치", I:"아이", J:"제이", K:"케이", L:"엘", M:"엠",
   N:"엔", O:"오", P:"피", Q:"큐", R:"알", S:"에스", T:"티", U:"유", V:"브이", W:"더블유", X:"엑스", Y:"와이", Z:"제트" };
 const DIGIT = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
-// 한 글자 변수(N, L, M 등)는 소리가 비슷해서 힌트를 붙임: "대문자 엔" + (낮은 톤) "노벰버의 엔"
-const NATO = { A:"알파", B:"브라보", C:"찰리", D:"델타", E:"에코", F:"폭스트롯", G:"골프", H:"호텔", I:"인디아", J:"줄리엣",
-  K:"킬로", L:"리마", M:"마이크", N:"노벰버", O:"오스카", P:"파파", Q:"퀘벡", R:"로미오", S:"시에라", T:"탱고",
-  U:"유니폼", V:"빅터", W:"위스키", X:"엑스레이", Y:"양키", Z:"줄루" };
+// 한 글자 변수(N, L, M 등)는 소리가 비슷해서 힌트를 붙임: "대문자 엘" + (낮은 톤) "러브의 엘"
+// 익숙한 영어 단어로, 엔·엠·엘처럼 헷갈리는 글자끼리는 첫소리가 확실히 다르게 고름
+const HINT_WORD = { A:"애플", B:"바나나", C:"캣", D:"도그", E:"에그", F:"프렌드", G:"게임", H:"하우스", I:"아이스", J:"주스",
+  K:"킹", L:"러브", M:"머니", N:"넘버", O:"오렌지", P:"피자", Q:"퀸", R:"로봇", S:"스타", T:"타이거",
+  U:"엄브렐라", V:"비디오", W:"윈도우", X:"엑스레이", Y:"요요", Z:"지브라" };
 const HINT_SKIP = new Set(["i", "j"]); // 반복문 i, j는 소리가 확실히 달라서 힌트 생략
 const HINT_PITCH = 0.7;                // 힌트는 낮은 톤으로 (폰 음성에 따라 톤 변화가 없을 수 있음)
 const SYMBOL = {
@@ -431,10 +432,12 @@ function codeLineToChunks(line, pron) {
       if (t.length === 1 && /[A-Za-z]/.test(t)) {        // 한 글자 변수
         out.push(sayChar(t));
         const U = t.toUpperCase();
-        if (!HINT_SKIP.has(t)) out.push({ t: `${NATO[U]}의 ${LETTER[U]}`, pitch: HINT_PITCH });
+        if (!HINT_SKIP.has(t)) out.push({ t: `${HINT_WORD[U]}의 ${LETTER[U]}`, pitch: HINT_PITCH });
       } else {
-        if (pron[t]) out.push(pron[t]);
-        out.push(spell(t));
+        const sp = spell(t);
+        // sc → "에스씨"처럼 발음이 철자 그대로면 한 번만 읽음
+        if (pron[t] && pron[t].replace(/\s/g, "") !== sp.replace(/\s/g, "")) out.push(pron[t]);
+        out.push(sp);
       }
     } else if (/^\d/.test(t)) {                 // 숫자: 한 자리씩 (예: 10 → 숫자 일 숫자 영)
       out.push([...t].map(c => c === "." ? "점" : "숫자 " + DIGIT[c]).join(" "));
