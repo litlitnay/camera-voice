@@ -134,7 +134,7 @@ const buzz = () => { try { navigator.vibrate && navigator.vibrate(60); } catch (
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- 1. 카메라 켜고 자동 촬영 ----------
-async function startCamera() {
+async function startCamera(isRetake = false) {
   const my = ++runId;
   stopSpeaking();
   photos = []; renderPhotos();
@@ -148,6 +148,7 @@ async function startCamera() {
   speechSynthesis.cancel();
   speechSynthesis.speak(new SpeechSynthesisUtterance(" "));
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
+  if (!isRetake) speakOnce("사진을 찍겠습니다."); // 재촬영 때는 "재촬영하겠습니다"를 이미 말했으므로 생략 (기다리지 않고 카메라와 동시에 진행)
 
   // 3장을 알아서 차례로 찍고, 다 찍으면 자동으로 전부 보냄
   for (let i = 0; i < PHOTO_COUNT; i++) {
@@ -268,6 +269,7 @@ $("fileInput").addEventListener("change", e => {
 
 // ---------- 2. Gemini에 자동 전송 ----------
 async function sendToGemini() {
+  const myRun = runId; // 안내 음성을 말하는 사이에 사용자가 새로 시작하면 이전 결과는 버림
   sending = true;
   setStatus(`Gemini에게 보내는 중... (사진 ${photos.length}장)`);
   const model = $("model").value.trim();
@@ -297,9 +299,9 @@ async function sendToGemini() {
         return;
       }
       setStatus(`⚠️ 사진이 흐리거나 문제가 안 읽혀요. 다시 찍을게요 (${retakeCount}/${MAX_AUTO_RETAKE})`);
-      await speakOnce("사진이 흐려요. 다시 찍을게요.");
+      await speakOnce("재촬영하겠습니다.");
       await sleep(500);
-      startCamera();
+      if (myRun === runId) startCamera(true);
       return;
     }
     retakeCount = 0;
@@ -307,7 +309,8 @@ async function sendToGemini() {
     $("answer").textContent = text;
     $("answer").style.display = "block";
     $("controls").classList.remove("hidden");
-    startLoop();
+    await speakOnce("정답을 말씀드리겠습니다.");
+    if (myRun === runId) startLoop();
   } catch (e) {
     setStatus("오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)");
     $("controls").classList.remove("hidden");
@@ -400,10 +403,11 @@ $("testBtn").onclick = () => {
   $("answer").textContent = SAMPLE_ANSWER;
   $("answer").style.display = "block";
   $("controls").classList.remove("hidden");
-  startLoop();
+  const my = ++runId;
+  speakOnce("정답을 말씀드리겠습니다.").then(() => { if (my === runId) startLoop(); });
 };
 $("playBtn").onclick = () => { if (answerText) startLoop(); };
-$("stopBtn").onclick = () => { stopSpeaking(); setStatus("⏹ 멈춤"); };
+$("stopBtn").onclick = () => { runId++; stopSpeaking(); setStatus("⏹ 멈춤"); }; // runId++ : 안내 음성 도중 멈춰도 읽기가 시작되지 않게
 speechSynthesis.onvoiceschanged = () => {};
 </script>
 </body>
