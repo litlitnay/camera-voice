@@ -47,6 +47,8 @@
   <input id="rate" type="number" step="0.05" min="0.5" max="2" value="0.85">
   <label>반복 사이 쉬는 시간 (초)</label>
   <input id="gap" type="number" step="0.5" min="0" value="1.5">
+  <label>한 줄 안에서 말마디 사이 쉬는 시간 (초)</label>
+  <input id="chunkgap" type="number" step="0.5" min="0" value="1.5">
   <label>코드 한 줄 읽고 쉬는 시간 (초)</label>
   <input id="linegap" type="number" step="1" min="0" value="10">
   <label>찍기 전 카운트다운 (초)</label>
@@ -77,7 +79,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const fields = ["key", "model", "prompt", "rate", "gap", "linegap", "countdown", "zoom"];
+const fields = ["key", "model", "prompt", "rate", "gap", "linegap", "chunkgap", "countdown", "zoom"];
 
 // 설정 저장/불러오기 (이 폰 브라우저에만 저장됨)
 fields.forEach(f => {
@@ -100,7 +102,8 @@ const SPEAK_RULE = `
 - 그 밖의 영어 단어와 메서드 이름은 영어 발음 그대로 한글로 붙여 써: int→인트, String→스트링, nextInt→넥스트인트, println→프린트엘엔.
 - 기호는 이렇게 읽어: . 점 / ; 세미콜론 / , 쉼표 / = 은 / ( 괄호 열고 / ) 닫고 / { 중괄호 열고 / } 중괄호 닫고 / [ 대괄호 열고 / ] 대괄호 닫고 / + 더하기 / - 빼기 / * 곱하기 / / 나누기 / % 나머지 / < 작다 / > 크다 / <= 작거나 같다 / >= 크거나 같다 / == 같다 / != 다르다 / && 앤드 / || 오어 / _ 언더바 / " 따옴표.
 - 괄호 안에 아무것도 없으면 "괄호 열고 닫고"라고만 읽어.
-- 예: int N = sc.nextInt(); → 인트 엔 은 에스씨 점 넥스트인트 괄호 열고 닫고 세미콜론`;
+- 받아적을 수 있게, 한 줄 안에서도 한두 단어(또는 기호)씩 슬래시( / )로 끊어 써. 슬래시는 읽는 단위를 나누는 표시일 뿐이야.
+- 예: int N = sc.nextInt(); → 인트 / 엔 / 은 / 에스씨 / 점 / 넥스트인트 / 괄호 열고 닫고 / 세미콜론`;
 const RETAKE_RULE = "\n\n[추가 규칙] 사진이 흐리거나, 잘렸거나, 너무 어둡거나, 문제 글자를 정확히 읽을 수 없으면 다른 말은 절대 하지 말고 정확히 RETAKE 라는 단어 하나만 출력해.";
 const setStatus = t => $("status").textContent = t;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -252,8 +255,11 @@ async function sendToGemini(dataUrl) {
 
 // ---------- 3. 답변을 음성으로 무한 반복 ----------
 // 코드 한 줄 = 한 번에 읽는 단위 (줄바꿈으로만 나눔)
+// 한 줄은 다시 슬래시(/)로 말마디 조각을 나눔
 function splitLines(t) {
-  return t.split(/\n+/).map(l => l.replace(/[*#`>|~]/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
+  return t.split(/\n+/)
+    .map(l => l.replace(/[*#`>|~]/g, " ").split("/").map(c => c.replace(/\s+/g, " ").trim()).filter(Boolean))
+    .filter(chunks => chunks.length);
 }
 // 멈춤 버튼을 누르면 쉬는 도중에도 바로 끝나는 대기
 async function waitWhileLooping(ms) {
@@ -279,13 +285,18 @@ async function startLoop() {
   await sleep(100);
   looping = true;
   const lines = splitLines(answerText);
+  const chunkGap = Math.max(0, Number($("chunkgap").value)) * 1000;
   const lineGap = Math.max(0, Number($("linegap").value)) * 1000;
   let round = 0;
   while (looping) {
     round++;
     for (let i = 0; i < lines.length && looping; i++) {
       setStatus(`🔊 재생 중 (${round}번째 · ${i + 1}/${lines.length}줄)`);
-      await speakOnce(lines[i]);
+      const chunks = lines[i];
+      for (let k = 0; k < chunks.length && looping; k++) {
+        await speakOnce(chunks[k]);
+        if (k < chunks.length - 1) await waitWhileLooping(chunkGap);
+      }
       if (i < lines.length - 1) {
         if (lineGap > 0) setStatus(`⏸ 다음 줄까지 쉬는 중 (${i + 1}/${lines.length}줄 끝)`);
         await waitWhileLooping(lineGap);
