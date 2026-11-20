@@ -64,6 +64,9 @@
   <input id="linegap" type="number" step="1" min="0" value="5">
   <label>찍기 전 카운트다운 (초)</label>
   <input id="countdown" type="number" min="0" max="10" value="5">
+  <label style="color:#eee;font-size:15px"><input type="checkbox" id="earOn" checked style="width:auto;margin-right:6px">🎧 이어폰 탭으로 조작</label>
+  <div style="font-size:13px;color:#aaa;line-height:1.5">재생/일시정지 → 읽기 멈춤·이어 듣기 / 이전 곡 → 처음부터 다시 듣기 / 다음 곡 → 새로 3장 찍기<br>
+  (QCY 앱에서 1탭=재생/일시정지, 2탭=이전 곡, 3탭=다음 곡으로 맞추세요)</div>
   <label>카메라 줌 (배, 1 = 줌 없음)</label>
   <input id="zoom" type="number" step="0.1" min="1" max="5" value="1.5">
 </details>
@@ -93,6 +96,7 @@
     <button id="againBtn" class="sub">📷 새로 찍기</button>
   </div>
 </div>
+<div id="earMsg" style="margin-top:10px;font-size:13px;color:#8fd19e"></div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -107,6 +111,7 @@ if (!$("key").value) $("settings").open = true;
 
 let stream = null, looping = false, answerText = "", wakeLock = null;
 let retakeCount = 0, digitalZoom = 1;
+let capturing = false, curLine = 0, pausedLine = 0; // 촬영~답 나오기 전에는 재생 조작을 무시, 멈춘 줄 기억
 const PHOTO_COUNT = 3; // 항상 3장을 자동으로 찍어서 한 번에 보냄
 let runId = 0;
 let photos = [], sending = false;
@@ -144,6 +149,8 @@ async function startCamera(isRetake = false) {
   if (!$("key").value.trim()) { $("settings").open = true; setStatus("먼저 설정에서 API 키를 넣어주세요."); return; }
 
   document.body.classList.remove("initial"); // 시작하면 버튼을 일반 크기로
+  capturing = true;
+  ensureEarbud();
   // 음성 기능 잠금 해제 (폰은 버튼을 누른 순간에만 소리를 허락함)
   speechSynthesis.cancel();
   speechSynthesis.speak(new SpeechSynthesisUtterance(" "));
@@ -295,6 +302,7 @@ async function sendToGemini() {
       retakeCount++;
       $("controls").classList.remove("hidden");
       if (retakeCount > MAX_AUTO_RETAKE) {
+        capturing = false;
         setStatus("⚠️ 계속 흐리게 찍혀요. 밝은 곳에서 문제를 화면에 꽉 차게 맞춘 뒤 '새로 찍기'를 눌러주세요.");
         return;
       }
@@ -309,9 +317,11 @@ async function sendToGemini() {
     $("answer").textContent = text;
     $("answer").style.display = "block";
     $("controls").classList.remove("hidden");
+    pausedLine = 0;
     await speakOnce("정답을 말씀드리겠습니다.");
-    if (myRun === runId) startLoop();
+    if (myRun === runId) { capturing = false; startLoop(); }
   } catch (e) {
+    capturing = false;
     setStatus("오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)");
     $("controls").classList.remove("hidden");
   } finally {
@@ -346,7 +356,7 @@ function speakOnce(sentence) {
     speechSynthesis.speak(u);
   });
 }
-async function startLoop() {
+async function startLoop(startLine = 0) {
   stopSpeaking();
   await sleep(100);
   looping = true;
@@ -356,13 +366,16 @@ async function startLoop() {
   let round = 0;
   while (looping) {
     round++;
-    for (let i = 0; i < lines.length && looping; i++) {
+    const from = (round === 1 && startLine < lines.length) ? startLine : 0;
+    for (let i = from; i < lines.length && looping; i++) {
+      curLine = i;
       setStatus(`🔊 재생 중 (${round}번째 · ${i + 1}/${lines.length}줄)`);
       const chunks = lines[i];
       for (let k = 0; k < chunks.length && looping; k++) {
         await speakOnce(chunks[k]);
         if (k < chunks.length - 1) await waitWhileLooping(chunkGap);
       }
+      if (!looping) break; // 멈춤 직후 상태 문구를 덮어쓰지 않게
       if (i < lines.length - 1) {
         if (lineGap > 0) setStatus(`⏸ 다음 줄까지 쉬는 중 (${i + 1}/${lines.length}줄 끝)`);
         await waitWhileLooping(lineGap);
@@ -395,6 +408,8 @@ const SAMPLE_ANSWER = [
 ].join("\n");
 $("testBtn").onclick = () => {
   document.body.classList.remove("initial");
+  capturing = false; pausedLine = 0;
+  ensureEarbud();
   photos = []; renderPhotos(); $("shotControls").classList.add("hidden");
   retakeCount = 0;
   stopCamera();
@@ -407,8 +422,66 @@ $("testBtn").onclick = () => {
   speakOnce("정답을 말씀드리겠습니다.").then(() => { if (my === runId) startLoop(); });
 };
 $("playBtn").onclick = () => { if (answerText) startLoop(); };
-$("stopBtn").onclick = () => { runId++; stopSpeaking(); setStatus("⏹ 멈춤"); }; // runId++ : 안내 음성 도중 멈춰도 읽기가 시작되지 않게
+$("stopBtn").onclick = () => { if (looping) pausedLine = curLine; runId++; stopSpeaking(); setStatus("⏹ 멈춤"); }; // runId++ : 안내 음성 도중 멈춰도 읽기가 시작되지 않게
 speechSynthesis.onvoiceschanged = () => {};
+
+// ---------- 4. 🎧 블루투스 이어폰 조작 (Media Session) ----------
+// 이어폰 탭은 '재생/일시정지·이전 곡·다음 곡' 신호로만 들어옴 (몇 번 탭했는지는 알 수 없음).
+// 신호를 받으려면 페이지가 '재생 중'이어야 해서, 소리 없는 오디오를 계속 틀어둠.
+let keepAlive = null;
+function silentWavUrl(sec) {
+  const rate = 8000, n = rate * sec, buf = new ArrayBuffer(44 + n), d = new DataView(buf);
+  const w = (o, t) => { for (let i = 0; i < t.length; i++) d.setUint8(o + i, t.charCodeAt(i)); };
+  w(0, "RIFF"); d.setUint32(4, 36 + n, true); w(8, "WAVE"); w(12, "fmt ");
+  d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+  d.setUint32(24, rate, true); d.setUint32(28, rate, true); d.setUint16(32, 1, true); d.setUint16(34, 8, true);
+  w(36, "data"); d.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) d.setUint8(44 + i, 128); // 8비트 무음
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+const earOn = () => $("earOn").checked;
+function ensureEarbud() {
+  if (!earOn() || !("mediaSession" in navigator)) return;
+  if (!keepAlive) {
+    keepAlive = new Audio(silentWavUrl(10)); // 너무 짧은 소리는 미디어로 인식 안 될 수 있어서 10초 반복
+    keepAlive.loop = true;
+    // 음성 읽기 등으로 멈추면 다시 틀어서 이어폰 신호를 계속 받음
+    keepAlive.addEventListener("pause", () => { if (earOn()) setTimeout(() => keepAlive.play().catch(() => {}), 300); });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: "찍고 듣기", artist: "1탭 멈춤/재생 · 2탭 처음부터 · 3탭 새로 찍기" });
+    const on = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) {} };
+    on("play", () => earAction("재생/일시정지", toggleReading));
+    on("pause", () => earAction("재생/일시정지", toggleReading));
+    on("previoustrack", () => earAction("이전 곡", replayFromStart));
+    on("nexttrack", () => earAction("다음 곡", () => { retakeCount = 0; startCamera(); }));
+  }
+  keepAlive.play().catch(() => {});
+  navigator.mediaSession.playbackState = "playing";
+}
+function earAction(name, fn) {
+  if (!earOn()) return;
+  $("earMsg").textContent = `🎧 이어폰 신호: ${name} (${new Date().toLocaleTimeString()})`;
+  fn();
+}
+function toggleReading() {
+  if (capturing) return; // 찍는 중·답 기다리는 중에는 무시
+  if (looping) {
+    pausedLine = curLine; runId++; stopSpeaking();
+    setStatus(`⏸ 멈춤 (${pausedLine + 1}번째 줄). 한 번 탭하면 이어서 읽어요`);
+  } else if (answerText) {
+    startLoop(pausedLine);
+  }
+}
+function replayFromStart() {
+  if (capturing || !answerText) return;
+  const my = ++runId; stopSpeaking(); pausedLine = 0;
+  speakOnce("처음부터 다시 읽겠습니다.").then(() => { if (my === runId) startLoop(0); });
+}
+try { const v = localStorage.getItem("gcv_earOn"); if (v !== null) $("earOn").checked = v === "1"; } catch (e) {}
+$("earOn").addEventListener("change", () => {
+  try { localStorage.setItem("gcv_earOn", earOn() ? "1" : "0"); } catch (e) {}
+  if (earOn()) ensureEarbud();
+  else if (keepAlive) { keepAlive.pause(); navigator.mediaSession.playbackState = "none"; }
+});
 </script>
 </body>
 </html>
