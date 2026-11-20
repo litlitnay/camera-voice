@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>찍고 듣기 - Gemini 카메라 음성</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+         background: #111; color: #eee; padding: 16px; max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  label { display: block; font-size: 13px; color: #aaa; margin: 10px 0 4px; }
+  input, textarea { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #333;
+                    background: #1c1c1c; color: #eee; font-size: 15px; }
+  textarea { min-height: 60px; resize: vertical; }
+  details { background: #1a1a1a; border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; }
+  summary { cursor: pointer; font-weight: 600; }
+  button { width: 100%; padding: 16px; font-size: 18px; font-weight: 700; border: 0;
+           border-radius: 12px; margin-top: 10px; cursor: pointer; }
+  .main { background: #4f8cff; color: #fff; }
+  .sub  { background: #2a2a2a; color: #eee; font-size: 16px; padding: 12px; }
+  .stop { background: #ff5a5a; color: #fff; }
+  .row { display: flex; gap: 8px; } .row button { flex: 1; }
+  #stage { position: relative; margin-top: 14px; border-radius: 12px; overflow: hidden;
+           background: #000; aspect-ratio: 3/4; display: none; }
+  #stage video, #stage img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #count { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           font-size: 96px; font-weight: 800; color: #fff; text-shadow: 0 0 20px #000; }
+  #status { margin-top: 12px; font-size: 15px; color: #9ec1ff; min-height: 20px; }
+  #answer { margin-top: 10px; background: #1a1a1a; border-radius: 10px; padding: 14px;
+            line-height: 1.6; white-space: pre-wrap; display: none; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<h1>📷 찍고 → 🤖 Gemini → 🔊 계속 듣기</h1>
+
+<details id="settings">
+  <summary>설정 (처음 한 번만)</summary>
+  <label>Gemini API 키 (aistudio.google.com 에서 발급)</label>
+  <input id="key" type="password" placeholder="AIza..." autocomplete="off">
+  <label>모델 이름</label>
+  <input id="model" value="gemini-3.6-flash">
+  <label>Gemini에게 보낼 질문</label>
+  <textarea id="prompt">이 사진에 무엇이 있는지 한국어로 쉽고 짧게 설명해줘. 소리로 읽어줄 거라서 마크다운이나 기호 없이 문장으로만 답해줘.</textarea>
+  <label>읽는 속도 (0.5 ~ 2)</label>
+  <input id="rate" type="number" step="0.1" min="0.5" max="2" value="1">
+  <label>반복 사이 쉬는 시간 (초)</label>
+  <input id="gap" type="number" step="0.5" min="0" value="1.5">
+  <label>찍기 전 카운트다운 (초)</label>
+  <input id="countdown" type="number" min="0" max="10" value="3">
+</details>
+
+<button id="startBtn" class="main">시작 (카메라 켜고 자동으로 찍기)</button>
+<input id="fileInput" type="file" accept="image/*" capture="environment" class="hidden">
+
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <img id="photo" alt="찍은 사진" class="hidden">
+  <div id="count"></div>
+</div>
+
+<div id="status"></div>
+<div id="answer"></div>
+
+<div id="controls" class="hidden">
+  <button id="stopBtn" class="stop">⏹ 음성 멈추기</button>
+  <div class="row">
+    <button id="playBtn" class="sub">▶ 다시 재생</button>
+    <button id="againBtn" class="sub">📷 새로 찍기</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fields = ["key", "model", "prompt", "rate", "gap", "countdown"];
+
+// 설정 저장/불러오기 (이 폰 브라우저에만 저장됨)
+fields.forEach(f => {
+  try { const v = localStorage.getItem("gcv_" + f); if (v !== null) $(f).value = v; } catch (e) {}
+  $(f).addEventListener("change", () => { try { localStorage.setItem("gcv_" + f, $(f).value); } catch (e) {} });
+});
+if (!$("key").value) $("settings").open = true;
+
+let stream = null, looping = false, answerText = "", wakeLock = null;
+const setStatus = t => $("status").textContent = t;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------- 1. 카메라 켜고 자동 촬영 ----------
+async function startCamera() {
+  stopSpeaking();
+  $("answer").style.display = "none";
+  $("controls").classList.add("hidden");
+  if (!$("key").value.trim()) { $("settings").open = true; setStatus("먼저 설정에서 API 키를 넣어주세요."); return; }
+
+  // 음성 기능 잠금 해제 (폰은 버튼을 누른 순간에만 소리를 허락함)
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(" "));
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false
+    });
+  } catch (e) {
+    // 자동 카메라가 안 되면 폰 기본 카메라 앱으로 대신 찍기
+    setStatus("자동 카메라를 쓸 수 없어서 기본 카메라를 엽니다. 사진을 찍어주세요.");
+    $("fileInput").value = "";
+    $("fileInput").click();
+    return;
+  }
+
+  $("stage").style.display = "block";
+  $("photo").classList.add("hidden");
+  const v = $("video");
+  v.classList.remove("hidden");
+  v.srcObject = stream;
+  await v.play();
+  await sleep(700); // 초점·밝기 맞출 시간
+
+  for (let i = Number($("countdown").value) || 0; i > 0; i--) {
+    $("count").textContent = i; setStatus("곧 찍어요...");
+    await sleep(1000);
+  }
+  $("count").textContent = "";
+
+  const c = document.createElement("canvas");
+  const scale = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
+  c.width = v.videoWidth * scale; c.height = v.videoHeight * scale;
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  const dataUrl = c.toDataURL("image/jpeg", 0.85);
+  stopCamera();
+  showPhoto(dataUrl);
+  await sendToGemini(dataUrl);
+}
+
+function stopCamera() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  $("video").classList.add("hidden");
+}
+
+function showPhoto(dataUrl) {
+  $("stage").style.display = "block";
+  $("photo").src = dataUrl;
+  $("photo").classList.remove("hidden");
+}
+
+// 기본 카메라 앱으로 찍었을 때
+$("fileInput").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = async () => {
+    const c = document.createElement("canvas");
+    const scale = Math.min(1, 1280 / Math.max(img.width, img.height));
+    c.width = img.width * scale; c.height = img.height * scale;
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    const dataUrl = c.toDataURL("image/jpeg", 0.85);
+    showPhoto(dataUrl);
+    await sendToGemini(dataUrl);
+  };
+  img.src = URL.createObjectURL(file);
+});
+
+// ---------- 2. Gemini에 자동 전송 ----------
+async function sendToGemini(dataUrl) {
+  setStatus("Gemini에게 보내는 중...");
+  const base64 = dataUrl.split(",")[1];
+  const model = $("model").value.trim();
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": $("key").value.trim() },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { inline_data: { mime_type: "image/jpeg", data: base64 } },
+          { text: $("prompt").value }
+        ] }]
+      })
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error?.message || ("HTTP " + res.status));
+    const text = (json.candidates?.[0]?.content?.parts || [])
+      .filter(p => p.text && !p.thought).map(p => p.text).join("\n").trim();
+    if (!text) throw new Error("답변이 비어 있어요.");
+    answerText = text;
+    $("answer").textContent = text;
+    $("answer").style.display = "block";
+    $("controls").classList.remove("hidden");
+    startLoop();
+  } catch (e) {
+    setStatus("오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)");
+    $("controls").classList.remove("hidden");
+  }
+}
+
+// ---------- 3. 답변을 음성으로 무한 반복 ----------
+function cleanForSpeech(t) {
+  return t.replace(/[*#_`>|~]/g, " ").replace(/\s+/g, " ").trim();
+}
+function splitSentences(t) {
+  // 긴 글을 한 번에 읽으면 중간에 끊기는 폰이 있어서 문장 단위로 나눔
+  return t.match(/[^.!?。\n]+[.!?。]?/g)?.map(s => s.trim()).filter(Boolean) || [t];
+}
+function koreanVoice() {
+  return speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith("ko"));
+}
+function speakOnce(sentence) {
+  return new Promise(resolve => {
+    const u = new SpeechSynthesisUtterance(sentence);
+    u.lang = "ko-KR";
+    const v = koreanVoice(); if (v) u.voice = v;
+    u.rate = Number($("rate").value) || 1;
+    u.onend = resolve; u.onerror = resolve;
+    speechSynthesis.speak(u);
+  });
+}
+async function startLoop() {
+  stopSpeaking();
+  await sleep(100);
+  looping = true;
+  const sentences = splitSentences(cleanForSpeech(answerText));
+  let round = 0;
+  while (looping) {
+    round++;
+    setStatus(`🔊 재생 중 (${round}번째)`);
+    for (const s of sentences) {
+      if (!looping) break;
+      await speakOnce(s);
+    }
+    if (looping) await sleep((Number($("gap").value) || 0) * 1000);
+  }
+}
+function stopSpeaking() {
+  looping = false;
+  speechSynthesis.cancel();
+}
+
+$("startBtn").onclick = startCamera;
+$("againBtn").onclick = startCamera;
+$("playBtn").onclick = () => { if (answerText) startLoop(); };
+$("stopBtn").onclick = () => { stopSpeaking(); setStatus("⏹ 멈춤"); };
+speechSynthesis.onvoiceschanged = () => {};
+</script>
+</body>
+</html>
