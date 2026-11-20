@@ -52,6 +52,8 @@
   <input id="key" type="password" placeholder="AIza..." autocomplete="off">
   <label>모델 이름</label>
   <input id="model" value="gemini-3.6-flash">
+  <label>서버가 바쁠 때 쓸 대체 모델 (비우면 사용 안 함)</label>
+  <input id="fallback" value="gemini-2.5-flash">
   <label>Gemini에게 보낼 질문</label>
   <textarea id="prompt">지금부터 코딩 문제를 보여주면 다른 설명 아무것도 없이, 답만 출력해. 언어는 java이고, 답은 for (int test_case =1; test_case <= T; test_case++) {이 안에 들어갈 답만 출력해}.</textarea>
   <label>읽는 속도 (0.5 ~ 2)</label>
@@ -100,7 +102,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const fields = ["key", "model", "prompt", "rate", "gap", "linegap", "chunkgap", "countdown", "zoom"];
+const fields = ["key", "model", "fallback", "prompt", "rate", "gap", "linegap", "chunkgap", "countdown", "zoom"];
 
 // 설정 저장/불러오기 (이 폰 브라우저에만 저장됨)
 fields.forEach(f => {
@@ -117,6 +119,7 @@ let runId = 0;
 let photos = [], sending = false;
 const MULTI_RULE = n => `\n\n[여러 장] 사진 ${n}장은 모두 한 문제를 찍은 거야. 같은 부분을 겹쳐 찍었을 수도 있고, 위에서부터 순서대로 나눠 찍었을 수도 있어. 사진들을 합쳐서 하나의 문제로 읽고 풀어줘.`;
 const MAX_AUTO_RETAKE = 3;
+const MAX_BUSY_RETRY = 3; // 서버가 바쁠 때 자동 재시도 횟수
 // 저장된 예전 프롬프트를 써도 같은 답이 두 번 읽히지 않도록 코드에서 한 번 더 못박음
 const SPEAK_RULE = `
 
@@ -275,24 +278,62 @@ $("fileInput").addEventListener("change", e => {
 });
 
 // ---------- 2. Gemini에 자동 전송 ----------
+// 한 모델에 묻기. 서버가 바쁘면(503 등) 2초 → 4초 → 8초 뒤 같은 내용으로 재시도.
+// 성공하면 응답 JSON, 새로 시작돼서 그만둘 땐 null, 실패하면 오류(status, busy, model 포함)를 던짐.
+async function askModel(model, body, myRun, announce) {
+  for (let attempt = 0; ; attempt++) {
+    let res, json;
+    try {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": $("key").value.trim() },
+        body
+      });
+      json = await res.json().catch(() => ({}));
+    } catch (netErr) { res = { ok: false, status: 0 }; json = {}; } // 네트워크 끊김도 재시도
+    if (res.ok) return json;
+    const busy = [0, 500, 502, 503, 504].includes(res.status) || /high demand|overloaded|unavailable/i.test(json.error?.message || "");
+    if (!busy || attempt >= MAX_BUSY_RETRY) {
+      const err = new Error(json.error?.message || ("HTTP " + res.status));
+      err.status = res.status; err.busy = busy; err.model = model;
+      throw err;
+    }
+    const wait = 2 ** (attempt + 1);
+    setStatus(`⏳ ${model} 서버가 바빠요. ${wait}초 뒤 다시 보낼게요 (${attempt + 1}/${MAX_BUSY_RETRY})`);
+    if (attempt === 0 && announce) await speakOnce("서버가 바빠서 잠시 후 다시 시도합니다.");
+    await sleep(wait * 1000);
+    if (myRun !== runId) return null; // 그 사이 새로 시작했으면 중단
+    setStatus(`${model}에게 다시 보내는 중... (사진 ${photos.length}장)`);
+  }
+}
+
 async function sendToGemini() {
   const myRun = runId; // 안내 음성을 말하는 사이에 사용자가 새로 시작하면 이전 결과는 버림
   sending = true;
   setStatus(`Gemini에게 보내는 중... (사진 ${photos.length}장)`);
   const model = $("model").value.trim();
+  const body = JSON.stringify({
+    contents: [{ parts: [
+      ...photos.map(d => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } })),
+      { text: $("prompt").value + (photos.length > 1 ? MULTI_RULE(photos.length) : "") + SPEAK_RULE + RETAKE_RULE }
+    ] }]
+  });
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": $("key").value.trim() },
-      body: JSON.stringify({
-        contents: [{ parts: [
-          ...photos.map(d => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } })),
-          { text: $("prompt").value + (photos.length > 1 ? MULTI_RULE(photos.length) : "") + SPEAK_RULE + RETAKE_RULE }
-        ] }]
-      })
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error?.message || ("HTTP " + res.status));
+    let json, usedModel = model;
+    try {
+      json = await askModel(model, body, myRun, true);
+    } catch (e) {
+      // 기본 모델이 계속 바쁘면 대체 모델로 다시 물어봄
+      const fb = $("fallback").value.trim();
+      if (!e.busy || !fb || fb === model || myRun !== runId) throw e;
+      setStatus(`🔁 ${model} 서버가 계속 바빠요. 대체 모델(${fb})로 다시 물어볼게요`);
+      await speakOnce("서버가 바빠서 다른 모델로 다시 물어보겠습니다.");
+      if (myRun !== runId) return;
+      usedModel = fb;
+      try { json = await askModel(fb, body, myRun, false); }
+      catch (e2) { e2.triedFallback = true; throw e2; }
+    }
+    if (!json) return; // 새로 시작돼서 중단
     const text = (json.candidates?.[0]?.content?.parts || [])
       .filter(p => p.text && !p.thought).map(p => p.text).join("\n").trim();
     if (!text) throw new Error("답변이 비어 있어요.");
@@ -318,12 +359,35 @@ async function sendToGemini() {
     $("answer").style.display = "block";
     $("controls").classList.remove("hidden");
     pausedLine = 0;
+    $("earMsg").textContent = usedModel !== model ? `🔁 대체 모델(${usedModel})로 받은 답이에요` : "";
     await speakOnce("정답을 말씀드리겠습니다.");
     if (myRun === runId) { capturing = false; startLoop(); }
   } catch (e) {
     capturing = false;
-    setStatus("오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)");
     $("controls").classList.remove("hidden");
+    // 원인별로 안내 (화면 + 음성)
+    let msg, say;
+    if (e.status === 429) {
+      msg = "⚠️ 사용 한도를 넘었어요 (무료: 분당 5번·하루 20번). 1분쯤 뒤 다시 찍어보고, 계속 안 되면 오늘 한도를 다 쓴 거예요.";
+      say = "사용 한도를 넘었습니다. 잠시 후 다시 찍어주세요.";
+    } else if (e.busy && e.triedFallback) {
+      msg = "⚠️ 기본 모델과 대체 모델 서버가 모두 바빠서 답을 못 받았어요. 잠시 후 다시 찍어주세요.";
+      say = "두 모델 모두 서버가 바빠서 답을 받지 못했습니다. 잠시 후 다시 찍어주세요.";
+    } else if (e.triedFallback && [400, 404].includes(e.status)) {
+      msg = `⚠️ 대체 모델(${e.model})을 쓸 수 없어요. 설정의 대체 모델 이름을 확인해주세요. (${e.message})`;
+      say = "대체 모델을 쓸 수 없습니다. 설정을 확인해주세요.";
+    } else if (e.busy) {
+      msg = "⚠️ Gemini 서버가 계속 바빠서 답을 못 받았어요. 잠시 후 다시 찍어주세요.";
+      say = "서버가 바빠서 답을 받지 못했습니다. 잠시 후 다시 찍어주세요.";
+    } else if ([400, 401, 403, 404].includes(e.status)) {
+      msg = "오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)";
+      say = "오류가 났습니다. 화면을 확인해주세요.";
+    } else {
+      msg = "오류: " + e.message;
+      say = "오류가 났습니다. 화면을 확인해주세요.";
+    }
+    setStatus(msg);
+    if (myRun === runId) speakOnce(say);
   } finally {
     sending = false;
   }
