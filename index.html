@@ -42,7 +42,8 @@
   <label>모델 이름</label>
   <input id="model" value="gemini-3.6-flash">
   <label>Gemini에게 보낼 질문</label>
-  <textarea id="prompt">이 사진에 무엇이 있는지 한국어로 쉽고 짧게 설명해줘. 소리로 읽어줄 거라서 마크다운이나 기호 없이 문장으로만 답해줘.</textarea>
+  <textarea id="prompt">지금부터 코딩 문제를 보여주면 다른 설명 아무것도 없이, 답만 출력해. 언어는 java이고, 답은 for (int test_case =1; test_case <= T; test_case++;) {이 안에 들어갈 답만 출력해}.
+그리고 코드를 음성으로 들을수 있게 한글자씩 텍스트로 출력해. 한줄 마다 쉬는 시간을 가져가면서 읽을 수 있게 출력하고, 새로운 변수명이나 어려운 문법은 한 음절씩 읽어줘.</textarea>
   <label>읽는 속도 (0.5 ~ 2)</label>
   <input id="rate" type="number" step="0.1" min="0.5" max="2" value="1">
   <label>반복 사이 쉬는 시간 (초)</label>
