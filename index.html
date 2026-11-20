@@ -58,6 +58,7 @@
 </details>
 
 <button id="startBtn" class="main">시작 (카메라 켜고 자동으로 찍기)</button>
+<button id="testBtn" class="sub">🔊 음성만 테스트 (사진·API 안 씀)</button>
 <input id="fileInput" type="file" accept="image/*" capture="environment" class="hidden">
 
 <div id="stage">
@@ -313,6 +314,22 @@ function stopSpeaking() {
 // 직접 누르면 자동 재촬영 횟수를 처음부터 다시 셈
 $("startBtn").onclick = () => { retakeCount = 0; startCamera(); };
 $("againBtn").onclick = () => { retakeCount = 0; startCamera(); };
+// 사진·Gemini 없이 샘플 답으로 음성/쉬는 시간만 확인 (API 한도 소모 없음)
+const SAMPLE_ANSWER = [
+  "인트 / 엔 / 은 / 에스씨 / 점 / 넥스트인트 / 괄호 열고 닫고 / 세미콜론",
+  "포 / 괄호 열고 / 인트 / 아이 / 은 / 영 / 세미콜론 / 아이 / 작다 / 엔 / 세미콜론 / 아이 / 플러스 플러스 / 닫고",
+  "에스 / 점 / 어펜드 / 괄호 열고 / 아이 / 닫고 / 세미콜론"
+].join("\n");
+$("testBtn").onclick = () => {
+  retakeCount = 0;
+  stopCamera();
+  speechSynthesis.cancel();
+  answerText = SAMPLE_ANSWER;
+  $("answer").textContent = SAMPLE_ANSWER;
+  $("answer").style.display = "block";
+  $("controls").classList.remove("hidden");
+  startLoop();
+};
 $("playBtn").onclick = () => { if (answerText) startLoop(); };
 $("stopBtn").onclick = () => { stopSpeaking(); setStatus("⏹ 멈춤"); };
 speechSynthesis.onvoiceschanged = () => {};
