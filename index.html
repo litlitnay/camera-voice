@@ -44,13 +44,13 @@
   <label>Gemini에게 보낼 질문</label>
   <textarea id="prompt">지금부터 코딩 문제를 보여주면 다른 설명 아무것도 없이, 답만 출력해. 언어는 java이고, 답은 for (int test_case =1; test_case <= T; test_case++) {이 안에 들어갈 답만 출력해}.</textarea>
   <label>읽는 속도 (0.5 ~ 2)</label>
-  <input id="rate" type="number" step="0.05" min="0.5" max="2" value="0.85">
+  <input id="rate" type="number" step="0.05" min="0.5" max="2" value="0.8">
   <label>반복 사이 쉬는 시간 (초)</label>
-  <input id="gap" type="number" step="0.5" min="0" value="1.5">
+  <input id="gap" type="number" step="0.5" min="0" value="10">
   <label>한 줄 안에서 말마디 사이 쉬는 시간 (초)</label>
-  <input id="chunkgap" type="number" step="0.5" min="0" value="1.5">
+  <input id="chunkgap" type="number" step="0.5" min="0" value="0.5">
   <label>코드 한 줄 읽고 쉬는 시간 (초)</label>
-  <input id="linegap" type="number" step="1" min="0" value="10">
+  <input id="linegap" type="number" step="1" min="0" value="5">
   <label>찍기 전 카운트다운 (초)</label>
   <input id="countdown" type="number" min="0" max="10" value="5">
   <label>카메라 줌 (배, 1 = 줌 없음)</label>
@@ -100,7 +100,9 @@ const SPEAK_RULE = `
 - 코드 한 줄을 출력 한 줄로 바꿔. 줄바꿈으로만 줄을 나누고, 빈 줄·번호·마크다운·마침표는 쓰지 마.
 - 모든 글자와 기호를 한국어 소리로 풀어 써. 영어·숫자·기호를 그대로 쓰지 마.
 - 변수 이름이 한두 글자거나 약어면 알파벳 이름 그대로 읽어: N→엔, T→티, i→아이, sc→에스씨, sb→에스비. 숫자는 한국어로 읽어.
-- 그 밖의 영어 단어와 메서드 이름은 영어 발음 그대로 한글로 붙여 써: int→인트, String→스트링, nextInt→넥스트인트, println→프린트엘엔.
+- 자바 예약어와 아주 기본적인 이름(int, for, if, else, while, return, new, class, public, static, void, String, Scanner, System, out, print, println, Math, nextInt, nextLine, length, size)은 영어 발음 그대로 한글로 붙여 써: int→인트, String→스트링, nextInt→넥스트인트.
+- 그 밖의 모든 변수 이름, 메서드 이름, 생소한 문법은 먼저 영어 발음을 한 조각으로 쓰고, 바로 다음 조각에 알파벳을 한 글자씩 풀어 써. 대문자는 글자 앞에 "대문자"를 붙여. 예: append → 어펜드 / 에이 피 피 이 엔 디, maxValue → 맥스밸류 / 엠 에이 엑스 대문자브이 에이 엘 유 이.
+- 알파벳 읽기: A 에이, B 비, C 씨, D 디, E 이, F 에프, G 지, H 에이치, I 아이, J 제이, K 케이, L 엘, M 엠, N 엔, O 오, P 피, Q 큐, R 알, S 에스, T 티, U 유, V 브이, W 더블유, X 엑스, Y 와이, Z 제트.
 - 기호는 이렇게 읽어: . 점 / ; 세미콜론 / , 쉼표 / = 은 / ( 괄호 열고 / ) 닫고 / { 중괄호 열고 / } 중괄호 닫고 / [ 대괄호 열고 / ] 대괄호 닫고 / + 더하기 / - 빼기 / * 곱하기 / / 나누기 / % 나머지 / < 작다 / > 크다 / <= 작거나 같다 / >= 크거나 같다 / == 같다 / != 다르다 / && 앤드 / || 오어 / _ 언더바 / " 따옴표.
 - 괄호 안에 아무것도 없으면 "괄호 열고 닫고"라고만 읽어.
 - 받아적을 수 있게, 한 줄 안에서도 한두 단어(또는 기호)씩 슬래시( / )로 끊어 써. 슬래시는 읽는 단위를 나누는 표시일 뿐이야.
@@ -303,6 +305,12 @@ async function startLoop() {
         await waitWhileLooping(lineGap);
       }
     }
+    if (!looping) break;
+    // 마지막 줄도 받아적을 시간을 준 뒤, 끝났다고 알리고 다시 시작
+    await waitWhileLooping(lineGap);
+    if (!looping) break;
+    setStatus(`✅ 끝났어요 (${round}번째). 곧 처음부터 다시 읽어요`);
+    await speakOnce("끝났습니다. 잠시 후 처음부터 다시 읽겠습니다.");
     await waitWhileLooping((Number($("gap").value) || 0) * 1000);
   }
 }
