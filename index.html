@@ -393,6 +393,12 @@ async function sendToGemini() {
 const LETTER = { A:"에이", B:"비", C:"씨", D:"디", E:"이", F:"에프", G:"지", H:"에이치", I:"아이", J:"제이", K:"케이", L:"엘", M:"엠",
   N:"엔", O:"오", P:"피", Q:"큐", R:"알", S:"에스", T:"티", U:"유", V:"브이", W:"더블유", X:"엑스", Y:"와이", Z:"제트" };
 const DIGIT = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+// 한 글자 변수(N, L, M 등)는 소리가 비슷해서 힌트를 붙임: "대문자 엔" + (낮은 톤) "노벰버의 엔"
+const NATO = { A:"알파", B:"브라보", C:"찰리", D:"델타", E:"에코", F:"폭스트롯", G:"골프", H:"호텔", I:"인디아", J:"줄리엣",
+  K:"킬로", L:"리마", M:"마이크", N:"노벰버", O:"오스카", P:"파파", Q:"퀘벡", R:"로미오", S:"시에라", T:"탱고",
+  U:"유니폼", V:"빅터", W:"위스키", X:"엑스레이", Y:"양키", Z:"줄루" };
+const HINT_SKIP = new Set(["i", "j"]); // 반복문 i, j는 소리가 확실히 달라서 힌트 생략
+const HINT_PITCH = 0.7;                // 힌트는 낮은 톤으로 (폰 음성에 따라 톤 변화가 없을 수 있음)
 const SYMBOL = {
   "++": "플러스 플러스", "--": "마이너스 마이너스", "+=": "더하기 은", "-=": "빼기 은", "*=": "곱하기 은", "/=": "나누기 은",
   "%=": "나머지 은", "==": "같다", "!=": "다르다", "<=": "작거나 같다", ">=": "크거나 같다", "&&": "앤드", "||": "오어",
@@ -422,8 +428,14 @@ function codeLineToChunks(line, pron) {
     const t = toks[i];
     if (t === "(" && toks[i + 1] === ")") { out.push("괄호 열고 닫고"); i++; continue; }
     if (/^[A-Za-z_]/.test(t)) {                 // 단어: 발음 한 번 + 철자
-      if (t.length > 1 && pron[t]) out.push(pron[t]);
-      out.push(spell(t));
+      if (t.length === 1 && /[A-Za-z]/.test(t)) {        // 한 글자 변수
+        out.push(sayChar(t));
+        const U = t.toUpperCase();
+        if (!HINT_SKIP.has(t)) out.push({ t: `${NATO[U]}의 ${LETTER[U]}`, pitch: HINT_PITCH });
+      } else {
+        if (pron[t]) out.push(pron[t]);
+        out.push(spell(t));
+      }
     } else if (/^\d/.test(t)) {                 // 숫자: 한 자리씩 (예: 10 → 숫자 일 숫자 영)
       out.push([...t].map(c => c === "." ? "점" : "숫자 " + DIGIT[c]).join(" "));
     } else if (t[0] === '"' || t[0] === "'") {  // 따옴표: 작은따옴표/큰따옴표 구분
@@ -466,12 +478,13 @@ function koreanVoice() {
   const voices = speechSynthesis.getVoices();
   return voices.find(v => v.lang && v.lang.replace("_", "-").startsWith("ko"));
 }
-function speakOnce(sentence) {
+function speakOnce(sentence, pitch) {
   return new Promise(resolve => {
     const u = new SpeechSynthesisUtterance(sentence);
     u.lang = "ko-KR";
     const v = koreanVoice(); if (v) u.voice = v;
     u.rate = Number($("rate").value) || 1;
+    u.pitch = pitch || 1;
     u.onend = resolve; u.onerror = resolve;
     speechSynthesis.speak(u);
   });
@@ -495,7 +508,7 @@ async function startLoop(startLine = 0) {
       setStatus(`🔊 재생 중 (${round}번째 · ${i + 1}/${lines.length}줄)`);
       const chunks = lines[i];
       for (let k = 0; k < chunks.length && on(); k++) {
-        await speakOnce(chunks[k]);
+        await speakOnce(chunks[k].t ?? chunks[k], chunks[k].pitch); // 힌트 조각은 낮은 톤
         if (k < chunks.length - 1) await waitWhileLooping(chunkGap, on);
       }
       if (!on()) break; // 멈춤 직후 상태 문구를 덮어쓰지 않게
@@ -526,11 +539,12 @@ $("nextBtn").onclick = () => { $("shotControls").classList.add("hidden"); $("fil
 const SAMPLE_ANSWER = [
   "```java",
   "int N = sc.nextInt();",
-  "String line = sc.next();",
+  "int L = sc.nextInt();",
+  "for (int j = L; j >= calorie[i]; j--) {",
   "sum += line.charAt(j) - '0';",
-  "System.out.println(\"#\" + test_case + \" \" + sum);",
+  "System.out.println(\"#\" + test_case + \" \" + dp[L]);",
   "```",
-  "발음: int=인트, sc=에스씨, nextInt=넥스트인트, String=스트링, line=라인, next=넥스트, sum=섬, charAt=차앳, System=시스템, out=아웃, println=프린트엘엔, test_case=테스트케이스"
+  "발음: int=인트, sc=에스씨, nextInt=넥스트인트, for=포, calorie=칼로리, sum=섬, line=라인, charAt=차앳, System=시스템, out=아웃, println=프린트엘엔, test_case=테스트케이스, dp=디피"
 ].join("\n");
 $("testBtn").onclick = () => {
   document.body.classList.remove("initial");
