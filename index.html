@@ -30,9 +30,14 @@
   #answer { margin-top: 10px; background: #1a1a1a; border-radius: 10px; padding: 14px;
             line-height: 1.6; white-space: pre-wrap; display: none; }
   .hidden { display: none !important; }
+  /* 처음 화면: 시작 버튼이 남은 화면을 가득 채움 */
+  body.initial { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
+  body.initial details { flex: none; }
+  body.initial #startBtn { flex: 1; min-height: 55vh; min-height: 55dvh; font-size: 36px; line-height: 1.4; }
+  body.initial #testBtn { flex: none; }
 </style>
 </head>
-<body>
+<body class="initial">
 <h1>📷 찍고 → 🤖 Gemini → 🔊 계속 듣기</h1>
 
 <details id="settings">
@@ -57,7 +62,7 @@
   <input id="zoom" type="number" step="0.1" min="1" max="5" value="1.5">
 </details>
 
-<button id="startBtn" class="main">시작 (카메라 켜고 자동으로 찍기)</button>
+<button id="startBtn" class="main">📷<br>시작<br><span style="font-size:15px;font-weight:400">카메라 켜고 자동으로 찍기</span></button>
 <button id="testBtn" class="sub">🔊 음성만 테스트 (사진·API 안 씀)</button>
 <input id="fileInput" type="file" accept="image/*" capture="environment" class="hidden">
 
@@ -118,6 +123,7 @@ async function startCamera() {
   $("controls").classList.add("hidden");
   if (!$("key").value.trim()) { $("settings").open = true; setStatus("먼저 설정에서 API 키를 넣어주세요."); return; }
 
+  document.body.classList.remove("initial"); // 시작하면 버튼을 일반 크기로
   // 음성 기능 잠금 해제 (폰은 버튼을 누른 순간에만 소리를 허락함)
   speechSynthesis.cancel();
   speechSynthesis.speak(new SpeechSynthesisUtterance(" "));
@@ -329,6 +335,7 @@ const SAMPLE_ANSWER = [
   "에스 / 점 / 어펜드 / 괄호 열고 / 아이 / 닫고 / 세미콜론"
 ].join("\n");
 $("testBtn").onclick = () => {
+  document.body.classList.remove("initial");
   retakeCount = 0;
   stopCamera();
   speechSynthesis.cancel();
