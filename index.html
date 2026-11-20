@@ -42,14 +42,18 @@
   <label>모델 이름</label>
   <input id="model" value="gemini-3.6-flash">
   <label>Gemini에게 보낼 질문</label>
-  <textarea id="prompt">지금부터 코딩 문제를 보여주면 다른 설명 아무것도 없이, 답만 출력해. 언어는 java이고, 답은 for (int test_case =1; test_case <= T; test_case++;) {이 안에 들어갈 답만 출력해}.
+  <textarea id="prompt">지금부터 코딩 문제를 보여주면 다른 설명 아무것도 없이, 답만 출력해. 언어는 java이고, 답은 for (int test_case =1; test_case <= T; test_case++) {이 안에 들어갈 답만 출력해}.
 그리고 코드를 음성으로 들을수 있게 한글자씩 텍스트로 출력해. 한줄 마다 쉬는 시간을 가져가면서 읽을 수 있게 출력하고, 새로운 변수명이나 어려운 문법은 한 음절씩 읽어줘.</textarea>
   <label>읽는 속도 (0.5 ~ 2)</label>
-  <input id="rate" type="number" step="0.1" min="0.5" max="2" value="1">
+  <input id="rate" type="number" step="0.1" min="0.5" max="2" value="0.8">
   <label>반복 사이 쉬는 시간 (초)</label>
   <input id="gap" type="number" step="0.5" min="0" value="1.5">
   <label>찍기 전 카운트다운 (초)</label>
-  <input id="countdown" type="number" min="0" max="10" value="3">
+  <input id="countdown" type="number" min="0" max="10" value="5">
+  <label>카메라 줌 (배, 1 = 줌 없음)</label>
+  <input id="zoom" type="number" step="0.1" min="1" max="5" value="1.5">
+  <label>음성 이름 (폰에 설치된 음성, 없으면 기본 한국어 음성)</label>
+  <input id="voice" value="하늬">
 </details>
 
 <button id="startBtn" class="main">시작 (카메라 켜고 자동으로 찍기)</button>
@@ -74,7 +78,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const fields = ["key", "model", "prompt", "rate", "gap", "countdown"];
+const fields = ["key", "model", "prompt", "rate", "gap", "countdown", "zoom", "voice"];
 
 // 설정 저장/불러오기 (이 폰 브라우저에만 저장됨)
 fields.forEach(f => {
@@ -84,6 +88,9 @@ fields.forEach(f => {
 if (!$("key").value) $("settings").open = true;
 
 let stream = null, looping = false, answerText = "", wakeLock = null;
+let retakeCount = 0, digitalZoom = 1;
+const MAX_AUTO_RETAKE = 3;
+const RETAKE_RULE = "\n\n[추가 규칙] 사진이 흐리거나, 잘렸거나, 너무 어둡거나, 문제 글자를 정확히 읽을 수 없으면 다른 말은 절대 하지 말고 정확히 RETAKE 라는 단어 하나만 출력해.";
 const setStatus = t => $("status").textContent = t;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -117,6 +124,7 @@ async function startCamera() {
   v.classList.remove("hidden");
   v.srcObject = stream;
   await v.play();
+  await applyZoom();
   await sleep(700); // 초점·밝기 맞출 시간
 
   for (let i = Number($("countdown").value) || 0; i > 0; i--) {
@@ -125,14 +133,33 @@ async function startCamera() {
   }
   $("count").textContent = "";
 
+  // 디지털 줌이 필요하면 가운데 부분만 잘라서 사용
+  const sw = v.videoWidth / digitalZoom, sh = v.videoHeight / digitalZoom;
+  const sx = (v.videoWidth - sw) / 2, sy = (v.videoHeight - sh) / 2;
   const c = document.createElement("canvas");
-  const scale = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
-  c.width = v.videoWidth * scale; c.height = v.videoHeight * scale;
-  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  const scale = Math.min(1, 1280 / Math.max(sw, sh));
+  c.width = sw * scale; c.height = sh * scale;
+  c.getContext("2d").drawImage(v, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const dataUrl = c.toDataURL("image/jpeg", 0.85);
   stopCamera();
   showPhoto(dataUrl);
   await sendToGemini(dataUrl);
+}
+
+// 줌: 카메라 자체 줌을 먼저 쓰고, 안 되면 디지털 줌(중앙 확대)으로 대신함
+async function applyZoom() {
+  const want = Math.max(1, Number($("zoom").value) || 1);
+  digitalZoom = want;
+  try {
+    const track = stream.getVideoTracks()[0];
+    const cap = track.getCapabilities && track.getCapabilities();
+    if (cap && cap.zoom) {
+      const target = Math.min(Math.max(want, cap.zoom.min), cap.zoom.max);
+      await track.applyConstraints({ advanced: [{ zoom: target }] });
+      digitalZoom = Math.max(1, want / target);
+    }
+  } catch (e) { digitalZoom = want; }
+  $("video").style.transform = `scale(${digitalZoom})`;
 }
 
 function stopCamera() {
@@ -176,7 +203,7 @@ async function sendToGemini(dataUrl) {
       body: JSON.stringify({
         contents: [{ parts: [
           { inline_data: { mime_type: "image/jpeg", data: base64 } },
-          { text: $("prompt").value }
+          { text: $("prompt").value + RETAKE_RULE }
         ] }]
       })
     });
@@ -185,6 +212,22 @@ async function sendToGemini(dataUrl) {
     const text = (json.candidates?.[0]?.content?.parts || [])
       .filter(p => p.text && !p.thought).map(p => p.text).join("\n").trim();
     if (!text) throw new Error("답변이 비어 있어요.");
+
+    // 사진이 흐리거나 문제를 못 읽으면: 답을 읽지 않고 다시 찍게 함
+    if (text.length < 30 && /RETAKE/i.test(text)) {
+      retakeCount++;
+      $("controls").classList.remove("hidden");
+      if (retakeCount > MAX_AUTO_RETAKE) {
+        setStatus("⚠️ 계속 흐리게 찍혀요. 밝은 곳에서 문제를 화면에 꽉 차게 맞춘 뒤 '새로 찍기'를 눌러주세요.");
+        return;
+      }
+      setStatus(`⚠️ 사진이 흐리거나 문제가 안 읽혀요. 다시 찍을게요 (${retakeCount}/${MAX_AUTO_RETAKE})`);
+      await speakOnce("사진이 흐려요. 다시 찍을게요.");
+      await sleep(500);
+      startCamera();
+      return;
+    }
+    retakeCount = 0;
     answerText = text;
     $("answer").textContent = text;
     $("answer").style.display = "block";
@@ -205,7 +248,13 @@ function splitSentences(t) {
   return t.match(/[^.!?。\n]+[.!?。]?/g)?.map(s => s.trim()).filter(Boolean) || [t];
 }
 function koreanVoice() {
-  return speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith("ko"));
+  const voices = speechSynthesis.getVoices();
+  const want = $("voice").value.trim().toLowerCase();
+  if (want) {
+    const m = voices.find(v => v.name.toLowerCase().includes(want));
+    if (m) return m;
+  }
+  return voices.find(v => v.lang && v.lang.replace("_", "-").startsWith("ko"));
 }
 function speakOnce(sentence) {
   return new Promise(resolve => {
@@ -238,8 +287,9 @@ function stopSpeaking() {
   speechSynthesis.cancel();
 }
 
-$("startBtn").onclick = startCamera;
-$("againBtn").onclick = startCamera;
+// 직접 누르면 자동 재촬영 횟수를 처음부터 다시 셈
+$("startBtn").onclick = () => { retakeCount = 0; startCamera(); };
+$("againBtn").onclick = () => { retakeCount = 0; startCamera(); };
 $("playBtn").onclick = () => { if (answerText) startLoop(); };
 $("stopBtn").onclick = () => { stopSpeaking(); setStatus("⏹ 멈춤"); };
 speechSynthesis.onvoiceschanged = () => {};
