@@ -30,6 +30,12 @@
   #answer { margin-top: 10px; background: #1a1a1a; border-radius: 10px; padding: 14px;
             line-height: 1.6; white-space: pre-wrap; display: none; }
   .hidden { display: none !important; }
+  #shots { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; }
+  .thumb { position: relative; flex: 0 0 auto; width: 96px; aspect-ratio: 3/4; border-radius: 10px;
+           overflow: hidden; background: #000; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb b { position: absolute; left: 6px; top: 4px; background: #000a; border-radius: 6px;
+             padding: 1px 7px; font-size: 13px; }
   /* 처음 화면: 시작 버튼이 남은 화면을 가득 채움 */
   body.initial { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
   body.initial details { flex: none; }
@@ -72,6 +78,11 @@
   <div id="count"></div>
 </div>
 
+<div id="shots" class="hidden"></div>
+<div id="shotControls" class="hidden">
+  <button id="nextBtn" class="main"></button>
+</div>
+
 <div id="status"></div>
 <div id="answer"></div>
 
@@ -96,6 +107,10 @@ if (!$("key").value) $("settings").open = true;
 
 let stream = null, looping = false, answerText = "", wakeLock = null;
 let retakeCount = 0, digitalZoom = 1;
+const PHOTO_COUNT = 3; // 항상 3장을 자동으로 찍어서 한 번에 보냄
+let runId = 0;
+let photos = [], sending = false;
+const MULTI_RULE = n => `\n\n[여러 장] 사진 ${n}장은 한 문제를 위에서부터 순서대로 나눠 찍은 거야. 전부 이어서 하나의 문제로 읽고 풀어줘.`;
 const MAX_AUTO_RETAKE = 3;
 // 저장된 예전 프롬프트를 써도 같은 답이 두 번 읽히지 않도록 코드에서 한 번 더 못박음
 const SPEAK_RULE = `
@@ -120,7 +135,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- 1. 카메라 켜고 자동 촬영 ----------
 async function startCamera() {
+  const my = ++runId;
   stopSpeaking();
+  photos = []; renderPhotos();
+  $("shotControls").classList.add("hidden");
   $("answer").style.display = "none";
   $("controls").classList.add("hidden");
   if (!$("key").value.trim()) { $("settings").open = true; setStatus("먼저 설정에서 API 키를 넣어주세요."); return; }
@@ -131,6 +149,16 @@ async function startCamera() {
   speechSynthesis.speak(new SpeechSynthesisUtterance(" "));
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) {}
 
+  // 3장을 알아서 차례로 찍고, 다 찍으면 자동으로 전부 보냄
+  for (let i = 0; i < PHOTO_COUNT; i++) {
+    const r = await captureOne(i, my);
+    if (r !== "ok") return; // 취소됐거나, 기본 카메라 앱으로 넘어간 경우
+  }
+  if (my !== runId) return;
+  await sendToGemini();
+}
+
+async function captureOne(i, my) {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false
@@ -138,10 +166,10 @@ async function startCamera() {
   } catch (e) {
     // 자동 카메라가 안 되면 폰 기본 카메라 앱으로 대신 찍기
     setStatus("자동 카메라를 쓸 수 없어서 기본 카메라를 엽니다. 사진을 찍어주세요.");
-    $("fileInput").value = "";
-    $("fileInput").click();
-    return;
+    if (i === 0) { $("fileInput").value = ""; $("fileInput").click(); } else showNext();
+    return "fallback";
   }
+  if (my !== runId) { stopCamera(); return "cancel"; }
 
   $("stage").style.display = "block";
   $("photo").classList.add("hidden");
@@ -152,11 +180,14 @@ async function startCamera() {
   await applyZoom();
   await sleep(700); // 초점·밝기 맞출 시간
 
-  for (let i = Number($("countdown").value) || 0; i > 0; i--) {
-    $("count").textContent = i; setStatus("곧 찍어요...");
+  const label = `📷 ${i + 1}/${PHOTO_COUNT}번째 사진` + (i > 0 ? " — 문제의 다음 부분으로 옮겨주세요." : "");
+  for (let k = Number($("countdown").value) || 0; k > 0; k--) {
+    if (my !== runId) { stopCamera(); return "cancel"; }
+    $("count").textContent = k; setStatus(label + " 곧 찍어요...");
     await sleep(1000);
   }
   $("count").textContent = "";
+  if (my !== runId) { stopCamera(); return "cancel"; }
 
   // 디지털 줌이 필요하면 가운데 부분만 잘라서 사용
   const sw = v.videoWidth / digitalZoom, sh = v.videoHeight / digitalZoom;
@@ -166,10 +197,9 @@ async function startCamera() {
   c.width = sw * scale; c.height = sh * scale;
   c.getContext("2d").drawImage(v, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const dataUrl = c.toDataURL("image/jpeg", 0.85);
-  buzz();
   stopCamera();
-  showPhoto(dataUrl);
-  await sendToGemini(dataUrl);
+  addPhoto(dataUrl);
+  return "ok";
 }
 
 // 줌: 카메라 자체 줌을 먼저 쓰고, 안 되면 디지털 줌(중앙 확대)으로 대신함
@@ -194,10 +224,29 @@ function stopCamera() {
   $("video").classList.add("hidden");
 }
 
-function showPhoto(dataUrl) {
-  $("stage").style.display = "block";
-  $("photo").src = dataUrl;
-  $("photo").classList.remove("hidden");
+// ---------- 사진 모으기 (항상 PHOTO_COUNT장) ----------
+function addPhoto(dataUrl) {
+  photos.push(dataUrl);
+  buzz(); // 사진이 찍힐 때마다 진동
+  $("stage").style.display = "none";
+  renderPhotos();
+}
+function renderPhotos() {
+  const box = $("shots");
+  box.textContent = "";
+  photos.forEach((d, i) => {
+    const t = document.createElement("div"); t.className = "thumb";
+    const img = document.createElement("img"); img.src = d; img.alt = `사진 ${i + 1}`;
+    const n = document.createElement("b"); n.textContent = i + 1;
+    t.append(img, n); box.append(t);
+  });
+  box.classList.toggle("hidden", photos.length === 0);
+}
+// 기본 카메라 앱으로만 찍을 수 있는 폰: 다음 사진 버튼 (앱이 마음대로 카메라를 열 수 없어서)
+function showNext() {
+  $("shotControls").classList.remove("hidden");
+  $("nextBtn").textContent = `📷 다음 사진 찍기 (${photos.length + 1}/${PHOTO_COUNT})`;
+  setStatus(`📷 ${photos.length}/${PHOTO_COUNT}장 찍었어요. 문제의 다음 부분을 찍어주세요.`);
 }
 
 // 기본 카메라 앱으로 찍었을 때
@@ -211,16 +260,16 @@ $("fileInput").addEventListener("change", e => {
     c.width = img.width * scale; c.height = img.height * scale;
     c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
     const dataUrl = c.toDataURL("image/jpeg", 0.85);
-    showPhoto(dataUrl);
-    await sendToGemini(dataUrl);
+    addPhoto(dataUrl);
+    if (photos.length < PHOTO_COUNT) showNext(); else await sendToGemini();
   };
   img.src = URL.createObjectURL(file);
 });
 
 // ---------- 2. Gemini에 자동 전송 ----------
-async function sendToGemini(dataUrl) {
-  setStatus("Gemini에게 보내는 중...");
-  const base64 = dataUrl.split(",")[1];
+async function sendToGemini() {
+  sending = true;
+  setStatus(`Gemini에게 보내는 중... (사진 ${photos.length}장)`);
   const model = $("model").value.trim();
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
@@ -228,8 +277,8 @@ async function sendToGemini(dataUrl) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": $("key").value.trim() },
       body: JSON.stringify({
         contents: [{ parts: [
-          { inline_data: { mime_type: "image/jpeg", data: base64 } },
-          { text: $("prompt").value + SPEAK_RULE + RETAKE_RULE }
+          ...photos.map(d => ({ inline_data: { mime_type: "image/jpeg", data: d.split(",")[1] } })),
+          { text: $("prompt").value + (photos.length > 1 ? MULTI_RULE(photos.length) : "") + SPEAK_RULE + RETAKE_RULE }
         ] }]
       })
     });
@@ -262,6 +311,8 @@ async function sendToGemini(dataUrl) {
   } catch (e) {
     setStatus("오류: " + e.message + "  (API 키나 모델 이름을 확인해보세요)");
     $("controls").classList.remove("hidden");
+  } finally {
+    sending = false;
   }
 }
 
@@ -331,6 +382,7 @@ function stopSpeaking() {
 // 직접 누르면 자동 재촬영 횟수를 처음부터 다시 셈
 $("startBtn").onclick = () => { retakeCount = 0; startCamera(); };
 $("againBtn").onclick = () => { retakeCount = 0; startCamera(); };
+$("nextBtn").onclick = () => { $("shotControls").classList.add("hidden"); $("fileInput").value = ""; $("fileInput").click(); };
 // 사진·Gemini 없이 샘플 답으로 음성/쉬는 시간만 확인 (API 한도 소모 없음)
 const SAMPLE_ANSWER = [
   "인트 / 엔 / 은 / 에스씨 / 점 / 넥스트인트 / 괄호 열고 닫고 / 세미콜론",
@@ -340,6 +392,7 @@ const SAMPLE_ANSWER = [
 ].join("\n");
 $("testBtn").onclick = () => {
   document.body.classList.remove("initial");
+  photos = []; renderPhotos(); $("shotControls").classList.add("hidden");
   retakeCount = 0;
   stopCamera();
   speechSynthesis.cancel();
