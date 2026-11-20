@@ -114,6 +114,8 @@ const SPEAK_RULE = `
 - 예: int N = sc.nextInt(); → 인트 / 엔 / 은 / 에스씨 / 점 / 넥스트인트 / 괄호 열고 닫고 / 세미콜론`;
 const RETAKE_RULE = "\n\n[추가 규칙] 사진이 흐리거나, 잘렸거나, 너무 어둡거나, 문제 글자를 정확히 읽을 수 없으면 다른 말은 절대 하지 말고 정확히 RETAKE 라는 단어 하나만 출력해.";
 const setStatus = t => $("status").textContent = t;
+// 사진이 찍혔을 때 약한 진동 (안드로이드 Chrome 등. 아이폰 Safari는 웹 진동 미지원)
+const buzz = () => { try { navigator.vibrate && navigator.vibrate(60); } catch (e) {} };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- 1. 카메라 켜고 자동 촬영 ----------
@@ -164,6 +166,7 @@ async function startCamera() {
   c.width = sw * scale; c.height = sh * scale;
   c.getContext("2d").drawImage(v, sx, sy, sw, sh, 0, 0, c.width, c.height);
   const dataUrl = c.toDataURL("image/jpeg", 0.85);
+  buzz();
   stopCamera();
   showPhoto(dataUrl);
   await sendToGemini(dataUrl);
