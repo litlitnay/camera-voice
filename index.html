@@ -45,6 +45,7 @@
 </head>
 <body class="initial">
 <h1>📷 찍고 → 🤖 Gemini → 🔊 계속 듣기</h1>
+<div id="earHint" style="font-size:14px;color:#8fd19e;margin:-6px 0 12px"></div>
 
 <details id="settings">
   <summary>설정 (처음 한 번만)</summary>
@@ -585,7 +586,7 @@ function silentWavUrl(sec) {
 }
 const earOn = () => $("earOn").checked;
 function ensureEarbud() {
-  if (!earOn() || !("mediaSession" in navigator)) return;
+  if (!earOn() || !("mediaSession" in navigator)) { setEarHint(false); return Promise.resolve(false); }
   if (!keepAlive) {
     keepAlive = new Audio(silentWavUrl(10)); // 너무 짧은 소리는 미디어로 인식 안 될 수 있어서 10초 반복
     keepAlive.loop = true;
@@ -598,8 +599,17 @@ function ensureEarbud() {
     on("previoustrack", () => earAction("이전 곡", replayFromStart));
     on("nexttrack", () => earAction("다음 곡", () => { retakeCount = 0; startCamera(); }));
   }
-  keepAlive.play().catch(() => {});
   navigator.mediaSession.playbackState = "playing";
+  // 성공하면 true. 한 번도 터치하지 않은 페이지에서는 Chrome이 소리 재생을 막아서 false가 될 수 있음
+  const ok = keepAlive.play().then(() => true, () => false);
+  ok.then(setEarHint);
+  return ok;
+}
+function setEarHint(connected) {
+  const h = $("earHint");
+  if (!earOn() || !("mediaSession" in navigator)) { h.textContent = ""; return; }
+  h.textContent = connected ? "🎧 이어폰 연결됨 · 3번 탭하면 사진을 찍어요"
+                            : "🎧 화면을 아무 곳이나 한 번 터치하면 이어폰 조작이 켜져요";
 }
 function earAction(name, fn) {
   if (!earOn()) return;
@@ -624,7 +634,12 @@ try { const v = localStorage.getItem("gcv_earOn"); if (v !== null) $("earOn").ch
 $("earOn").addEventListener("change", () => {
   try { localStorage.setItem("gcv_earOn", earOn() ? "1" : "0"); } catch (e) {}
   if (earOn()) ensureEarbud();
-  else if (keepAlive) { keepAlive.pause(); navigator.mediaSession.playbackState = "none"; }
+  else { setEarHint(false); if (keepAlive) { keepAlive.pause(); navigator.mediaSession.playbackState = "none"; } }
+});
+
+// 첫 화면에서도 이어폰 3번 탭 = 사진 찍기: 열리자마자 연결 시도, 막히면 화면 어디든 첫 터치 때 연결
+ensureEarbud().then(ok => {
+  if (!ok && earOn()) document.addEventListener("pointerdown", () => ensureEarbud(), { once: true, capture: true });
 });
 </script>
 </body>
