@@ -70,6 +70,10 @@
   <label style="color:#eee;font-size:15px"><input type="checkbox" id="earOn" checked style="width:auto;margin-right:6px">🎧 이어폰 탭으로 조작</label>
   <div style="font-size:13px;color:#aaa;line-height:1.5">재생/일시정지 → 읽던 줄 다시 듣기 / 이전 곡 → 새로 3장 찍기 / 다음 곡 → 처음 화면으로<br>
   (QCY 앱에서 1탭=재생/일시정지, 2탭=이전 곡, 3탭=다음 곡으로 맞추세요)</div>
+  <label>사용할 카메라 (흐리게 찍히면 다른 후면 카메라로 바꿔보세요)</label>
+  <select id="camSel" style="width:100%;padding:10px;border-radius:8px;border:1px solid #333;background:#1c1c1c;color:#eee;font-size:15px">
+    <option value="auto">자동 (메인 카메라)</option>
+  </select>
   <label>카메라 줌 (배, 1 = 줌 없음)</label>
   <input id="zoom" type="number" step="0.1" min="1" max="5" value="1.5">
 </details>
@@ -163,11 +167,63 @@ async function startCamera(isRetake = false) {
   await sendToGemini();
 }
 
+// ---------- 카메라 고르기 ----------
+// Chrome에 '후면 카메라'만 요청하면 초광각(초점 고정이라 가까운 글씨가 흐림)을 줄 때가 있어서,
+// 카메라 목록에서 메인 카메라를 직접 고름. 안드로이드 Chrome은 이름을 "camera2 0, facing back"처럼 알려주고,
+// 보통 번호가 가장 작은 후면 카메라가 메인.
+const camNum = d => { const m = /camera2\s*(\d+)/i.exec(d.label); return m ? Number(m[1]) : 999; };
+async function backCameras() {
+  try {
+    const all = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+    return all.filter(d => /back|rear|environment|후면/i.test(d.label)).sort((a, b) => camNum(a) - camNum(b));
+  } catch (e) { return []; }
+}
+async function pickCameraId() {
+  const backs = await backCameras();
+  if (!backs.length) return null;               // 이름을 아직 모름(첫 권한 허용 전) → Chrome에 맡김
+  let saved = "auto";
+  try { saved = localStorage.getItem("gcv_cam") || "auto"; } catch (e) {}
+  if (saved !== "auto" && backs.some(d => d.deviceId === saved)) return saved;
+  return backs[0].deviceId;                     // 자동: 번호가 가장 작은 후면 카메라
+}
+async function openCamera() {
+  const base = { width: { ideal: 1280 } };
+  let id = await pickCameraId();
+  let s = await navigator.mediaDevices.getUserMedia({
+    video: id ? { ...base, deviceId: { exact: id } } : { ...base, facingMode: { ideal: "environment" } }, audio: false
+  });
+  if (!id) { // 처음엔 카메라 이름을 몰라서 Chrome이 고른 걸로 열림 → 이제 이름을 알았으니 메인 카메라로 다시 엶
+    id = await pickCameraId();
+    const cur = s.getVideoTracks()[0]?.getSettings().deviceId;
+    if (id && id !== cur) {
+      s.getTracks().forEach(t => t.stop());
+      s = await navigator.mediaDevices.getUserMedia({ video: { ...base, deviceId: { exact: id } }, audio: false });
+    }
+    fillCameraList();
+  }
+  return s;
+}
+// 설정의 카메라 목록 채우기 (권한을 허용한 뒤에야 이름이 보임)
+async function fillCameraList() {
+  const sel = $("camSel"), backs = await backCameras();
+  let saved = "auto";
+  try { saved = localStorage.getItem("gcv_cam") || "auto"; } catch (e) {}
+  sel.length = 1;
+  backs.forEach((d, k) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = `후면 ${k + 1}` + (k === 0 ? " (자동이 고르는 카메라)" : "") + ` · ${d.label}`;
+    sel.append(o);
+  });
+  sel.value = backs.some(d => d.deviceId === saved) ? saved : "auto";
+}
+$("camSel").addEventListener("change", () => { try { localStorage.setItem("gcv_cam", $("camSel").value); } catch (e) {} });
+$("settings").addEventListener("toggle", () => { if ($("settings").open) fillCameraList(); });
+fillCameraList();
+
 async function captureOne(i, my) {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } }, audio: false
-    });
+    stream = await openCamera();
   } catch (e) {
     // 자동 카메라가 안 되면 폰 기본 카메라 앱으로 대신 찍기
     setStatus("자동 카메라를 쓸 수 없어서 기본 카메라를 엽니다. 사진을 찍어주세요.");
