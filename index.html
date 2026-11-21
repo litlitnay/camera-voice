@@ -68,7 +68,7 @@
   <label>찍기 전 카운트다운 (초)</label>
   <input id="countdown" type="number" min="0" max="10" value="5">
   <label style="color:#eee;font-size:15px"><input type="checkbox" id="earOn" checked style="width:auto;margin-right:6px">🎧 이어폰 탭으로 조작</label>
-  <div style="font-size:13px;color:#aaa;line-height:1.5">재생/일시정지 → 읽기 멈춤·이어 듣기 / 이전 곡 → 처음부터 다시 듣기 / 다음 곡 → 새로 3장 찍기<br>
+  <div style="font-size:13px;color:#aaa;line-height:1.5">재생/일시정지 → 읽던 줄 다시 듣기 / 이전 곡 → 새로 3장 찍기 / 다음 곡 → 처음 화면으로<br>
   (QCY 앱에서 1탭=재생/일시정지, 2탭=이전 곡, 3탭=다음 곡으로 맞추세요)</div>
   <label>카메라 줌 (배, 1 = 줌 없음)</label>
   <input id="zoom" type="number" step="0.1" min="1" max="5" value="1.5">
@@ -327,7 +327,7 @@ async function sendToGemini() {
       try { json = await askModel(fb, body, myRun, false); }
       catch (e2) { e2.triedFallback = true; throw e2; }
     }
-    if (!json) return; // 새로 시작돼서 중단
+    if (!json || myRun !== runId) return; // 새로 시작했거나 처음 화면으로 돌아갔으면 이 응답은 버림
     const text = (json.candidates?.[0]?.content?.parts || [])
       .filter(p => p.text && !p.thought).map(p => p.text).join("\n").trim();
     if (!text) throw new Error("답변이 비어 있어요.");
@@ -359,6 +359,7 @@ async function sendToGemini() {
     await speakOnce("정답을 말씀드리겠습니다.");
     if (myRun === runId) { capturing = false; startLoop(); }
   } catch (e) {
+    if (myRun !== runId) return; // 그 사이 처음 화면으로 돌아갔거나 새로 시작함
     capturing = false;
     $("controls").classList.remove("hidden");
     // 원인별로 안내 (화면 + 음성)
@@ -592,12 +593,12 @@ function ensureEarbud() {
     keepAlive.loop = true;
     // 음성 읽기 등으로 멈추면 다시 틀어서 이어폰 신호를 계속 받음
     keepAlive.addEventListener("pause", () => { if (earOn()) setTimeout(() => keepAlive.play().catch(() => {}), 300); });
-    navigator.mediaSession.metadata = new MediaMetadata({ title: "찍고 듣기", artist: "1탭 멈춤/재생 · 2탭 처음부터 · 3탭 새로 찍기" });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: "찍고 듣기", artist: "1탭 그 줄 다시 · 2탭 사진 찍기 · 3탭 처음 화면" });
     const on = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (e) {} };
-    on("play", () => earAction("재생/일시정지", toggleReading));
-    on("pause", () => earAction("재생/일시정지", toggleReading));
-    on("previoustrack", () => earAction("이전 곡", replayFromStart));
-    on("nexttrack", () => earAction("다음 곡", () => { retakeCount = 0; startCamera(); }));
+    on("play", () => earAction("재생/일시정지", repeatLine));
+    on("pause", () => earAction("재생/일시정지", repeatLine));
+    on("previoustrack", () => earAction("이전 곡", () => { retakeCount = 0; startCamera(); }));
+    on("nexttrack", () => earAction("다음 곡", resetToHome));
   }
   navigator.mediaSession.playbackState = "playing";
   // 성공하면 true. 한 번도 터치하지 않은 페이지에서는 Chrome이 소리 재생을 막아서 false가 될 수 있음
@@ -608,7 +609,7 @@ function ensureEarbud() {
 function setEarHint(connected) {
   const h = $("earHint");
   if (!earOn() || !("mediaSession" in navigator)) { h.textContent = ""; return; }
-  h.textContent = connected ? "🎧 이어폰 연결됨 · 3번 탭하면 사진을 찍어요"
+  h.textContent = connected ? "🎧 이어폰 연결됨 · 1번 탭: 그 줄 다시 · 2번 탭: 사진 찍기 · 3번 탭: 처음 화면"
                             : "🎧 화면을 아무 곳이나 한 번 터치하면 이어폰 조작이 켜져요";
 }
 function earAction(name, fn) {
@@ -616,19 +617,31 @@ function earAction(name, fn) {
   $("earMsg").textContent = `🎧 이어폰 신호: ${name} (${new Date().toLocaleTimeString()})`;
   fn();
 }
-function toggleReading() {
-  if (capturing) return; // 찍는 중·답 기다리는 중에는 무시
-  if (looping) {
-    pausedLine = curLine; runId++; stopSpeaking();
-    setStatus(`⏸ 멈춤 (${pausedLine + 1}번째 줄). 한 번 탭하면 이어서 읽어요`);
-  } else if (answerText) {
-    startLoop(pausedLine);
-  }
+// 3번 탭: 처음 화면으로 초기화 (페이지를 다시 열지 않아서 이어폰 연결이 유지됨)
+function resetToHome() {
+  runId++;                       // 찍는 중·답 기다리는 중인 작업은 모두 무효
+  stopSpeaking(); stopCamera();
+  capturing = false; retakeCount = 0; pausedLine = 0;
+  photos = []; renderPhotos();
+  answerText = ""; answerLines = null;
+  $("stage").style.display = "none"; $("count").textContent = "";
+  $("shotControls").classList.add("hidden");
+  $("answer").style.display = "none"; $("answer").textContent = "";
+  $("controls").classList.add("hidden");
+  $("earMsg").textContent = "";
+  document.body.classList.add("initial"); // 큰 시작 버튼 화면
+  window.scrollTo(0, 0);
+  setStatus("🏠 처음 화면이에요");
+  speakOnce("처음 화면으로 돌아왔습니다.");
 }
-function replayFromStart() {
-  if (capturing || !answerText) return;
-  const my = ++runId; stopSpeaking(); pausedLine = 0;
-  speakOnce("처음부터 다시 읽겠습니다.").then(() => { if (my === runId) startLoop(0); });
+// 1번 탭: 지금 읽던 줄을 그 줄 처음부터 다시 읽고, 그 뒤로 이어서 계속 읽음
+// (줄을 다 읽고 쉬는 중이면 방금 읽은 줄을 다시 읽음. 멈춘 상태면 멈췄던 줄부터)
+function repeatLine() {
+  if (capturing || !answerText) return; // 찍는 중·답 기다리는 중에는 무시
+  const line = looping ? curLine : pausedLine;
+  runId++;
+  setStatus(`🔁 ${line + 1}번째 줄 다시 읽어요`);
+  startLoop(line);
 }
 try { const v = localStorage.getItem("gcv_earOn"); if (v !== null) $("earOn").checked = v === "1"; } catch (e) {}
 $("earOn").addEventListener("change", () => {
